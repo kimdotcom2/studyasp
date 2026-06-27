@@ -1,0 +1,44 @@
+# ── .NET ───────────────────────────────────────────────
+bin/
+obj/
+*.user
+*.suo
+*.sln.docstates
+*.userprefs
+*.csproj.user
+.vs/
+*.DotSettings.user
+
+# ── NuGet ──────────────────────────────────────────────
+*.nupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+*.nuget.props
+*.nuget.targets
+
+# ── Build 결과 ─────────────────────────────────────────
+[Bb]uild/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+
+# ── SQLite DB 파일 ─────────────────────────────────────
+*.db
+*.db-shm
+*.db-wal
+
+# ── IDE / Editor ──────────────────────────────────────
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Logs ──────────────────────────────────────────────
+*.log
+logs/
