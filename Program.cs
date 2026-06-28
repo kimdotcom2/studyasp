@@ -23,7 +23,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection"))); 
 
 // Service를 DI 컨테이너에 등록
-builder.Services.AddScoped<BoardService>();
+builder.Services.AddBoardService();
 builder.Services.AddScoped<BoardRepository>();
 
 // ── 앱 빌드 (등록한 서비스들을 실제로 조립) ────────────────
