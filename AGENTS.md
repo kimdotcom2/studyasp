@@ -124,7 +124,294 @@
 - SmtpEmailService
 - RedisCacheService
 
-# 9. Domain Event 규칙
+# 9. DB 읽기/쓰기 분리 전략 (CQRS + N+1 방지) (중요)
+
+## 기본 원칙
+
+- **쓰기(CUD)**는 ORM(EF Core)을 통해 Domain Entity로 처리한다
+- **읽기(R)**는 읽기 전용 DTO(`{Name}View`)를 통해 Dapper로 처리한다
+- 같은 테이블이라도 쓰기와 읽기의 모델은 완전히 분리한다
+
+## 읽기 전용 View DTO
+
+### 위치
+
+```
+/Modules/{ModuleName}/Application/Dtos/{Name}View.cs
+```
+
+### 네이밍
+
+- `{Name}View` (예: `BoardView`, `BoardDetailView`, `BoardListView`)
+
+### 특징
+
+- Application 계층에 정의한다
+- 순수 데이터 구조 (로직 없음)
+- Entity와 1:1 관계일 필요 없음 (Join, 집계 등 자유롭게 구성)
+- public getter/setter 허용 (읽기 전용 단순 DTO이므로)
+- 외부 프레임워크에 의존하지 않음
+
+## Repository 구현 규칙
+
+Repository는 **읽기용(Read)과 쓰기용(Write)으로 분리**한다.
+
+- **Write Repository** — EF Core 기반, Domain Entity 처리
+- **Read Repository** — Dapper 기반, 읽기 전용 View DTO 반환
+
+모든 Repository의 **인터페이스는 Application 계층**에, **구현체는 Infrastructure 계층**에 두며, DI를 통해 주입한다.
+
+### Write Repository
+
+- `I{Entity}Repository` — Application/Interfaces 에 인터페이스 정의
+- `{Entity}Repository` — Infrastructure/Persistence 에 EF Core로 구현
+- `Task AddAsync(...)`, `Task UpdateAsync(...)`, `Task DeleteAsync(...)` 등 CUD 메서드
+- Domain Entity를 인자로 받고, EF Core를 통해 DB에 반영
+- 해당 모듈의 DbContext(`AppDbContext`)를 주입받아 사용
+
+```csharp
+// Application/Interfaces/IBoardRepository.cs
+public interface IBoardRepository
+{
+    Task AddAsync(Board board, CancellationToken ct);
+    Task UpdateAsync(Board board, CancellationToken ct);
+    Task DeleteAsync(Board board, CancellationToken ct);
+}
+
+// Infrastructure/Persistence/BoardRepository.cs (EF Core 구현)
+// AppDbContext를 주입받아 EF Core로 CUD 처리
+public class BoardRepository : IBoardRepository
+{
+    private readonly AppDbContext _context;
+
+    public BoardRepository(AppDbContext context)
+    {
+        _context = context;
+    }
+
+    public async Task AddAsync(Board board, CancellationToken ct)
+    {
+        await _context.Boards.AddAsync(board, ct);
+        await _context.SaveChangesAsync(ct);
+    }
+
+    public async Task UpdateAsync(Board board, CancellationToken ct)
+    {
+        _context.Boards.Update(board);
+        await _context.SaveChangesAsync(ct);
+    }
+
+    public async Task DeleteAsync(Board board, CancellationToken ct)
+    {
+        _context.Boards.Remove(board);
+        await _context.SaveChangesAsync(ct);
+    }
+}
+```
+
+### Read Repository
+
+- `I{Entity}QueryRepository` — Application/Interfaces 에 인터페이스 정의
+- `{Entity}QueryRepository` — Infrastructure/Persistence 에 Dapper로 구현
+- `Task<{Name}View?> GetByIdAsync(...)`, `Task<List<{Name}View>> GetListAsync(...)` 등
+- 읽기 전용 View DTO(`{Name}View`)만 반환
+
+```csharp
+// Application/Interfaces/IBoardQueryRepository.cs
+public interface IBoardQueryRepository
+{
+    Task<BoardView?> GetByIdAsync(int id, CancellationToken ct);
+    Task<List<BoardListView>> GetListAsync(int page, int size, CancellationToken ct);
+}
+
+// Infrastructure/Persistence/BoardQueryRepository.cs (Dapper 구현)
+public class BoardQueryRepository : IBoardQueryRepository
+{
+    private readonly string _connectionString;
+
+    public BoardQueryRepository(string connectionString)
+    {
+        _connectionString = connectionString;
+    }
+
+    public async Task<BoardView?> GetByIdAsync(int id, CancellationToken ct)
+    {
+        using IDbConnection conn = new SqliteConnection(_connectionString);
+        const string sql = @"
+            SELECT b.Id, b.Title, b.Content, b.CreatedAt,
+                   m.Name AS AuthorName,
+                   COUNT(c.Id) AS CommentCount
+            FROM Boards b
+            LEFT JOIN Members m ON b.MemberId = m.Id
+            LEFT JOIN Comments c ON c.BoardId = b.Id
+            WHERE b.Id = @Id
+            GROUP BY b.Id";
+        return await conn.QuerySingleOrDefaultAsync<BoardView>(sql, new { Id = id });
+    }
+
+    public async Task<List<BoardListView>> GetListAsync(int page, int size, CancellationToken ct)
+    {
+        using IDbConnection conn = new SqliteConnection(_connectionString);
+        const string sql = @"
+            SELECT b.Id, b.Title, b.CreatedAt,
+                   m.Name AS AuthorName,
+                   COUNT(c.Id) AS CommentCount
+            FROM Boards b
+            LEFT JOIN Members m ON b.MemberId = m.Id
+            LEFT JOIN Comments c ON c.BoardId = b.Id
+            GROUP BY b.Id
+            ORDER BY b.Id DESC
+            LIMIT @Size OFFSET @Offset";
+        return (await conn.QueryAsync<BoardListView>(sql, new
+        {
+            Size = size,
+            Offset = (page - 1) * size
+        })).ToList();
+    }
+}
+```
+
+### DI 등록 (Infrastructure)
+
+각 모듈은 자신의 Infrastructure 계층에 **확장 메서드(Extension Method)**를 통해 DI 설정을 분리한다. 모듈별로 하나의 확장 메서드 파일에서 Write/Read Repository, MediatR Handler, 기타 Infrastructure 구현체를 모두 등록한다.
+
+각 모듈은 **별개의 어셈블리(프로젝트)**로 분리될 수 있어야 하므로, MediatR Handler 등록 시 `RegisterServicesFromAssembly`에 **자신의 어셈블리**를 지정한다.
+
+#### 규칙
+
+- 파일 위치: `Infrastructure/{ModuleName}DependencyInjection.cs`
+- 메서드명: `Add{ModuleName}Module(this IServiceCollection services)`
+- MediatR Handler 등록: `services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof({ModuleName}DependencyInjection).Assembly))`
+- `Program.cs`에서는 각 모듈의 확장 메서드만 호출하면 된다
+
+```csharp
+// Infrastructure/BoardDependencyInjection.cs
+public static class BoardDependencyInjection
+{
+    public static IServiceCollection AddBoardModule(this IServiceCollection services)
+    {
+        // MediatR Handler (자기 어셈블리 스캔)
+        services.AddMediatR(cfg =>
+            cfg.RegisterServicesFromAssembly(typeof(BoardDependencyInjection).Assembly));
+
+        // Write Repository (EF Core)
+        services.AddScoped<IBoardRepository, BoardRepository>();
+
+        // Read Repository (Dapper)
+        services.AddScoped<IBoardQueryRepository>(provider =>
+        {
+            IConfiguration config = provider.GetRequiredService<IConfiguration>();
+            return new BoardQueryRepository(
+                config.GetConnectionString("DefaultConnection")!);
+        });
+
+        return services;
+    }
+}
+
+// Infrastructure/MemberDependencyInjection.cs (다른 모듈 예시)
+public static class MemberDependencyInjection
+{
+    public static IServiceCollection AddMemberModule(this IServiceCollection services)
+    {
+        // MediatR Handler (자기 어셈블리 스캔)
+        services.AddMediatR(cfg =>
+            cfg.RegisterServicesFromAssembly(typeof(MemberDependencyInjection).Assembly));
+
+        services.AddScoped<IMemberRepository, MemberRepository>();
+        services.AddScoped<IMemberQueryRepository, MemberQueryRepository>();
+        return services;
+    }
+}
+```
+
+#### Program.cs 사용 예시
+
+```csharp
+// Program.cs — 각 모듈의 확장 메서드만 호출
+builder.Services.AddBoardModule();
+builder.Services.AddMemberModule();
+// 다른 모듈들...
+```
+
+이렇게 하면 `Program.cs`는 각 모듈의 내부 구성을 전혀 알 필요 없이 확장 메서드만 호출하면 되므로, 모듈 간 결합도가 낮아지고 응집도가 높아진다. 또한 각 모듈이 별도의 프로젝트(어셈블리)로 분리되어도 MediatR Handler가 정상 동작한다.
+
+## N+1 문제 방지
+
+### 문제 상황 (ORM으로 읽기할 때)
+
+```csharp
+// ❌ ORM으로 목록 조회 시 N+1 발생
+List<Board> boards = await _context.Boards.ToListAsync();
+foreach (Board board in boards)  // N번의 추가 쿼리 발생
+{
+    _context.Entry(board).Reference(b => b.Category).Load();
+    _context.Entry(board).Collection(b => b.Comments).Load();
+}
+```
+
+### 해결 (Dapper 읽기 전용 DTO)
+
+```csharp
+// ✅ Dapper로 Join 한 번에 해결
+const string sql = @"
+    SELECT b.Id, b.Title, b.Content, b.CreatedAt,
+           c.Name AS CategoryName,
+           (SELECT COUNT(*) FROM Comments WHERE BoardId = b.Id) AS CommentCount
+    FROM Boards b
+    LEFT JOIN Categories c ON b.CategoryId = c.Id
+    ORDER BY b.CreatedAt DESC";
+
+List<BoardListView> boards = await conn.QueryAsync<BoardListView>(sql);
+```
+
+## CQRS와의 연계
+
+```csharp
+// Query - Read Repository (Dapper)로 읽기 전용 View DTO 반환
+public class GetBoardListHandler : IRequestHandler<GetBoardListQuery, Result<List<BoardListView>>>
+{
+    private readonly IBoardQueryRepository _queryRepo;  // Dapper
+
+    public async Task<Result<List<BoardListView>>> Handle(
+        GetBoardListQuery query, CancellationToken ct)
+    {
+        List<BoardListView> boards = await _queryRepo.GetListAsync(query.Page, query.Size, ct);
+        return Result.Success(boards);
+    }
+}
+
+// Command - Write Repository (EF Core)로 Domain Entity 저장
+public class CreateBoardHandler : IRequestHandler<CreateBoardCommand, Result<BoardDto>>
+{
+    private readonly IBoardRepository _repo;  // EF Core
+
+    public async Task<Result<BoardDto>> Handle(
+        CreateBoardCommand command, CancellationToken ct)
+    {
+        Board board = Board.Create(command.Title, command.Content, command.MemberId);
+        await _repo.AddAsync(board, ct);
+        return Result.Success(new BoardDto(board.Id, board.Title));
+    }
+}
+```
+
+## 요약
+
+| 구분 | 쓰기 (Command) | 읽기 (Query) |
+|------|---------------|-------------|
+| Repository | Write Repository (`IBoardRepository`) | Read Repository (`IBoardQueryRepository`) |
+| 기술 | EF Core (ORM) | Dapper (ADO.NET) |
+| 모델 | Domain Entity (`Board`) | 읽기 전용 View DTO (`BoardView`) |
+| Interface 위치 | `Application/Interfaces/` | `Application/Interfaces/` |
+| 구현 위치 | `Infrastructure/Persistence/` (EF Core) | `Infrastructure/Persistence/` (Dapper) |
+| 반환 | void 또는 Entity Id | `{Name}View` 또는 `List<{Name}View>` |
+| 특징 | 변경 감지, 트랜잭션 | Join, 집계, 프로젝션 자유로움 |
+| N+1 | 발생 가능 (주의) | 발생하지 않음 (SQL 직접 제어) |
+
+---
+
+# 10. Domain Event 규칙
 
 - Domain Layer에 정의
 - 순수 데이터 구조
@@ -133,7 +420,7 @@
 
 ---
 
-# 10. 예외 처리 규칙 (중요)
+# 11. 예외 처리 규칙 (중요)
 
 ## 기본 원칙
 
