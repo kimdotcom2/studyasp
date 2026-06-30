@@ -26,6 +26,10 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 builder.Services.AddBoardService();
 builder.Services.AddScoped<BoardRepository>();
 
+// MediatR 등록 (Command/Query Handler 자동 스캔)
+builder.Services.AddMediatR(config => 
+    config.RegisterServicesFromAssembly(typeof(Program).Assembly));
+
 // ── 앱 빌드 (등록한 서비스들을 실제로 조립) ────────────────
 var app = builder.Build();
 
