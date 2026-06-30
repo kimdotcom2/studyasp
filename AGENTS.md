@@ -53,6 +53,7 @@
 - Response DTO: `{UseCase}Response`
 - 일반 DTO: `{Name}Dto`
 - Contracts는 Application DTO와 반드시 분리
+- Controller는 MediatR의 `Send` 메서드를 통해 Command/Query를 Handler에 전달하며, 직접 비즈니스 로직을 수행하지 않는다
 
 # 4. Validation 규칙 (Presentation)
 
@@ -91,6 +92,18 @@
 - Command: 상태 변경
 - Query: 조회
 - 각 Command/Query는 하나의 Handler
+
+## 중재자 패턴 (Mediator Pattern)
+
+- Controller(Presentation)는 MediatR의 `Send` 메서드로 Command/Query를 전송하고, 해당 Handler가 비즈니스 로직을 처리한다
+- 이는 **중재자 패턴(Mediator Pattern)**에 해당하며, Presentation 계층과 Application 계층 간의 직접 의존성을 제거한다
+- Controller는 Handler를 직접 호출하지 않고 MediatR을 통해서만 호출한다
+
+### 호출 흐름
+
+```text
+Controller → MediatR.Send(Command/Query) → Handler → Domain Entity / Repository
+```
 
 # 7. Domain 규칙
 
@@ -271,21 +284,21 @@ public class BoardQueryRepository : IBoardQueryRepository
 }
 ```
 
-### DI 등록 (Infrastructure)
+### DI 등록
 
-각 모듈은 자신의 Infrastructure 계층에 **확장 메서드(Extension Method)**를 통해 DI 설정을 분리한다. 모듈별로 하나의 확장 메서드 파일에서 Write/Read Repository, MediatR Handler, 기타 Infrastructure 구현체를 모두 등록한다.
+각 모듈은 **모듈 루트에 확장 메서드(Extension Method)** 파일을 두어 모듈 전체의 DI 설정을 분리한다. 모듈별로 하나의 확장 메서드 파일에서 해당 모듈의 **모든 계층의 서비스**(Application의 Transformer/Builder/Module, Infrastructure의 Repository, Presentation의 Validator, MediatR Handler 등)를 등록한다.
 
 각 모듈은 **별개의 어셈블리(프로젝트)**로 분리될 수 있어야 하므로, MediatR Handler 등록 시 `RegisterServicesFromAssembly`에 **자신의 어셈블리**를 지정한다.
 
 #### 규칙
 
-- 파일 위치: `Infrastructure/{ModuleName}DependencyInjection.cs`
+- 파일 위치: `Modules/{ModuleName}/{ModuleName}DependencyInjection.cs`
 - 메서드명: `Add{ModuleName}Module(this IServiceCollection services)`
 - MediatR Handler 등록: `services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof({ModuleName}DependencyInjection).Assembly))`
 - `Program.cs`에서는 각 모듈의 확장 메서드만 호출하면 된다
 
 ```csharp
-// Infrastructure/BoardDependencyInjection.cs
+// Modules/Board/BoardDependencyInjection.cs
 public static class BoardDependencyInjection
 {
     public static IServiceCollection AddBoardModule(this IServiceCollection services)
@@ -309,7 +322,7 @@ public static class BoardDependencyInjection
     }
 }
 
-// Infrastructure/MemberDependencyInjection.cs (다른 모듈 예시)
+// Modules/Member/MemberDependencyInjection.cs (다른 모듈 예시)
 public static class MemberDependencyInjection
 {
     public static IServiceCollection AddMemberModule(this IServiceCollection services)
@@ -460,7 +473,7 @@ public class CreateBoardHandler : IRequestHandler<CreateBoardCommand, Result<Boa
 
 ---
 
-# 11. Handler 반환 규칙 (중요)
+# 12. Handler 반환 규칙 (중요)
 
 ## 기본 전략 (권장)
 
@@ -481,25 +494,27 @@ public class CreateBoardHandler : IRequestHandler<CreateBoardCommand, Result<Boa
 
 ## Handler 예시
 
+```csharp
 public Result<OrderResponse> Handle(CreateOrderCommand command)
 {
     if (command.Price <= 0)
         return Result.Failure<OrderResponse>("Invalid price");
 
-    var order = Order.Create(command.Id, command.Price);
+    Order order = Order.Create(command.Id, command.Price);
 
     return Result.Success(new OrderResponse(order.Id));
 }
+```
 
 ---
 
-# 12. DI 규칙
+# 13. DI 규칙
 
 - 모든 구현체 등록은 Infrastructure에서 수행
 - Application/Domain은 구현체를 모름
 - 인터페이스에만 의존
 
-# 13. 코딩 스타일 컨벤션
+# 14. 코딩 스타일 컨벤션
 
 ## 네이밍
 - 배열: 복수형 ~s
@@ -514,7 +529,7 @@ public Result<OrderResponse> Handle(CreateOrderCommand command)
 
 Task GetDataAsync(CancellationToken cancellationToken);
 
-# 14. AI Agent 코드 생성 규칙
+# 15. AI Agent 코드 생성 규칙
 
 - Controller에 비즈니스 로직 금지
 - 모든 유스케이스는 Handler로 구현
@@ -524,10 +539,111 @@ Task GetDataAsync(CancellationToken cancellationToken);
 - Contracts는 Presentation에서 사용
 - 의존성 방향 절대 위반 금지
 
-# 15. 아키텍처 철학
+# 16. 아키텍처 철학
 
 - 모듈은 독립된 비즈니스 경계를 가진다
 - CQRS는 기본 실행 모델이다
 - Domain이 시스템의 유일한 진실이다
 - Infrastructure는 교체 가능한 기술 계층이다
 - Presentation은 API 계약과 검증 책임만 가진다
+
+---
+
+# 17. 테스트 전략
+
+## 중요도 순서
+
+1. **통합 테스트 (외부 API/기술)** — 가장 중요
+   - 외부 API, 데이터베이스, 파일 시스템 등 외부 기술과 상호작용하는 코드 검증
+   - 실제 DB, 실제 HTTP 호출 등 환경 구성
+2. **일반 통합 테스트** — 중요
+   - 모듈 내 여러 계층이 함께 동작하는 흐름 검증
+   - 예) Handler → Repository → DbContext 전체 흐름
+3. **단위 테스트** — 기본
+   - 순수 비즈니스 로직 검증 (Domain Entity, ValueObject 등)
+   - 외부 의존성은 **Moq**을 사용하여 모킹
+
+## 도구
+
+- **Moq** — 단위 테스트에서 인터페이스 모킹
+- **xUnit** 또는 **NUnit** — 테스트 러너
+- **Testcontainers** — 통합 테스트용 실제 DB 컨테이너
+
+---
+
+# 18. 모듈 간 통신
+
+## 원칙
+
+- 모듈 간 직접 참조(클래스 호출) 금지
+- 모든 모듈 간 통신은 **MediatR을 사용한 이벤트 드리븐** 방식으로 처리한다
+- 이는 **옵저버 패턴(Observer Pattern)**에 해당하며, 발행자(Publisher)와 구독자(Subscriber)가 Notification을 매개로 느슨하게 결합된다
+
+## 방식
+
+- 한 모듈의 Command/Query Handler에서 필요한 경우 MediatR의 `IPublisher`를 통해 **Notification(이벤트)**을 발행
+- 다른 모듈의 `INotificationHandler`가 해당 이벤트를 구독하여 처리
+
+```csharp
+// Modules/Board/Application/Events/BoardCreatedEvent.cs
+// 모듈 간 통신용 Notification
+public class BoardCreatedEvent : INotification
+{
+    public int BoardId { get; }
+    public string Title { get; }
+    public int MemberId { get; }
+
+    public BoardCreatedEvent(int boardId, string title, int memberId)
+    {
+        BoardId = boardId;
+        Title = title;
+        MemberId = memberId;
+    }
+}
+
+// Modules/Notification/Application/Handlers/SendBoardCreatedNotificationHandler.cs
+// 다른 모듈에서 이벤트 구독
+public class SendBoardCreatedNotificationHandler : INotificationHandler<BoardCreatedEvent>
+{
+    public async Task Handle(BoardCreatedEvent notification, CancellationToken ct)
+    {
+        // 게시글 작성 알림 발송 로직
+    }
+}
+```
+
+## 발행 흐름
+
+```csharp
+// Command Handler에서 이벤트 발행
+public class CreateBoardHandler : IRequestHandler<CreateBoardCommand, Result<BoardDto>>
+{
+    private readonly IBoardRepository _repo;
+    private readonly IPublisher _publisher;
+
+    public CreateBoardHandler(IBoardRepository repo, IPublisher publisher)
+    {
+        _repo = repo;
+        _publisher = publisher;
+    }
+
+    public async Task<Result<BoardDto>> Handle(CreateBoardCommand command, CancellationToken ct)
+    {
+        Board board = Board.Create(command.Title, command.Content, command.MemberId);
+        await _repo.AddAsync(board, ct);
+
+        // 이벤트 발행
+        await _publisher.Publish(
+            new BoardCreatedEvent(board.Id, board.Title, board.MemberId), ct);
+
+        return Result.Success(new BoardDto(board.Id, board.Title));
+    }
+}
+```
+
+## 규칙
+
+- 이벤트 클래스는 발행 모듈의 `Application/Events/`에 정의한다
+- 이벤트 구독 Handler는 구독 모듈의 `Application/Handlers/`에 정의한다
+- 이벤트는 순수 데이터 구조여야 하며, 비즈니스 로직을 포함하지 않는다
+- 모듈 간 순환 참조가 발생하지 않도록 주의한다
