@@ -706,7 +706,7 @@ public class CreateBoardHandler : IRequestHandler<CreateBoardCommand, Result<Boa
         await _publisher.Publish(
             new BoardCreatedEvent(board.Id, board.Title, board.MemberId), ct);
 
-        return Result.Success(new BoardDto(board.Id, board.Title));
+        return Result.Ok(new BoardDto(board.Id, board.Title));
     }
 }
 ```
