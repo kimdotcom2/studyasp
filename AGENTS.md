@@ -66,6 +66,7 @@
 - FluentValidation 사용 금지
 - 모든 유스케이스는 Handler로 구현 (CQRS)
 - 입력은 이미 검증된 상태라고 가정
+- 모든 Handler는 **FluentResults**의 `Result<T>`를 반환한다
 
 ## 공통 재사용 컴포넌트 (Application Service 개념)
 
@@ -390,7 +391,7 @@ public class GetBoardListHandler : IRequestHandler<GetBoardListQuery, Result<Lis
         GetBoardListQuery query, CancellationToken ct)
     {
         List<BoardListView> boards = await _queryRepo.GetListAsync(query.Page, query.Size, ct);
-        return Result.Success(boards);
+        return Result.Ok(boards);
     }
 }
 
@@ -404,7 +405,7 @@ public class CreateBoardHandler : IRequestHandler<CreateBoardCommand, Result<Boa
     {
         Board board = Board.Create(command.Title, command.Content, command.MemberId);
         await _repo.AddAsync(board, ct);
-        return Result.Success(new BoardDto(board.Id, board.Title));
+        return Result.Ok(new BoardDto(board.Id, board.Title));
     }
 }
 ```
@@ -473,14 +474,31 @@ public class CreateBoardHandler : IRequestHandler<CreateBoardCommand, Result<Boa
 
 ---
 
-# 12. Handler 반환 규칙 (중요)
+# 12. Handler 반환 규칙 — FluentResults 기반 Result 패턴 (중요)
 
 ## 기본 전략 (권장)
 
 - 모든 Handler의 반환 타입은 기본적으로 `Result<T>` 또는 `Task<Result<T>>`여야 한다
 - 비동기 Handler는 반드시 `Task<Result<T>>`를 사용한다
+- **FluentResults** 라이브러리를 사용하여 Result를 반환한다
 - 비즈니스 실패는 Exception이 아닌 Result로 표현한다
 - 시스템 예외만 Exception으로 처리한다
+
+## FluentResults 라이브러리
+
+- NuGet 패키지: `FluentResults`
+- 네임스페이스: `using FluentResults;`
+
+### 주요 API
+
+| 메서드 | 설명 |
+|--------|------|
+| `Result.Ok<T>(T value)` | 성공 Result 생성 |
+| `Result.Fail<T>(string message)` | 실패 Result 생성 |
+| `result.IsSuccess` / `result.IsFailed` | 성공/실패 여부 확인 |
+| `result.Errors` | 실패 이유 목록 |
+| `result.WithError(string)` | 실패 이유 추가 |
+| `result.WithSuccess(string)` | 성공 메시지 추가 |
 
 ## Result 패턴 의미
 
@@ -495,14 +513,66 @@ public class CreateBoardHandler : IRequestHandler<CreateBoardCommand, Result<Boa
 ## Handler 예시
 
 ```csharp
-public Result<OrderResponse> Handle(CreateOrderCommand command)
+using FluentResults;
+
+public class CreateOrderHandler : IRequestHandler<CreateOrderCommand, Result<OrderResponse>>
 {
-    if (command.Price <= 0)
-        return Result.Failure<OrderResponse>("Invalid price");
+    public async Task<Result<OrderResponse>> Handle(
+        CreateOrderCommand command, CancellationToken ct)
+    {
+        if (command.Price <= 0)
+            return Result.Fail<OrderResponse>("Invalid price");
 
-    Order order = Order.Create(command.Id, command.Price);
+        Order order = Order.Create(command.Id, command.Price);
 
-    return Result.Success(new OrderResponse(order.Id));
+        return Result.Ok(new OrderResponse(order.Id));
+    }
+}
+
+public class GetBoardListHandler : IRequestHandler<GetBoardListQuery, Result<List<BoardListView>>>
+{
+    private readonly IBoardQueryRepository _queryRepo;
+
+    public GetBoardListHandler(IBoardQueryRepository queryRepo)
+    {
+        _queryRepo = queryRepo;
+    }
+
+    public async Task<Result<List<BoardListView>>> Handle(
+        GetBoardListQuery query, CancellationToken ct)
+    {
+        List<BoardListView> boards = await _queryRepo.GetListAsync(query.Page, query.Size, ct);
+        return Result.Ok(boards);
+    }
+}
+```
+
+## Controller에서 Result 처리
+
+Controller는 FluentResults의 `Result<T>`를 받아 HTTP 응답으로 변환한다. 직접 `try-catch` 없이 `IsSuccess`/`IsFailed`로 분기하거나, 글로벌 매핑 미들웨어를 사용한다.
+
+```csharp
+[ApiController]
+public class OrderController : ControllerBase
+{
+    private readonly IMediator _mediator;
+
+    public OrderController(IMediator mediator)
+    {
+        _mediator = mediator;
+    }
+
+    [HttpPost]
+    public async Task<IActionResult> CreateOrder(CreateOrderRequest request)
+    {
+        CreateOrderCommand command = new(request.Price);
+        Result<OrderResponse> result = await _mediator.Send(command);
+
+        if (result.IsFailed)
+            return BadRequest(result.Errors);
+
+        return Ok(result.Value);
+    }
 }
 ```
 
